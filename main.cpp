@@ -351,7 +351,7 @@ int main()
 
     double_buffered<std::optional<cl_event>> unfinished_events;
 
-    int ichunk = CHUNK_SIZE;
+    size_t ichunk = CHUNK_SIZE;
 
     buffer standard_chunk_size;
     standard_chunk_size.alloc(ctx, sizeof(ichunk));
