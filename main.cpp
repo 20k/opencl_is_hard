@@ -351,13 +351,17 @@ int main()
 
     double_buffered<std::optional<cl_event>> unfinished_events;
 
+    int ichunk = CHUNK_SIZE;
+
+    buffer standard_chunk_size;
+    standard_chunk_size.alloc(ctx, sizeof(ichunk));
+    standard_chunk_size.async_write(cqueue, &ichunk, sizeof(ichunk));
+
     int remaining = file_to_read_size;
 
     while(remaining > 0)
     {
         int to_read = std::min(remaining, CHUNK_SIZE);
-
-        int* ntoread = new int(to_read);
 
         if(unfinished_events.get(0) != std::nullopt)
             wait(*unfinished_events.get(0));
@@ -366,12 +370,22 @@ int main()
 
         cl_event gpudatawrite = gpu_data.get(0).async_write(async_queue, fptrs.get(0), to_read);
 
-        buffer real_size;
-        real_size.alloc(ctx, 8);
-        cl_event evt4 = real_size.async_write(cqueue, ntoread, sizeof(to_read));
+        if(to_read != CHUNK_SIZE)
+        {
+            int* ntoread = new int(to_read);
 
-        cl_event kevent = exec_1d(cqueue, kernel, {gpu_data.get(0).mem, word_count.mem, newline_count.mem, real_size.mem}, to_read, 64, {gpudatawrite, evt4});
-        unfinished_events.get(0) = kevent;
+            buffer real_size;
+            real_size.alloc(ctx, 8);
+            cl_event evt4 = real_size.async_write(async_queue, ntoread, sizeof(to_read));
+
+            cl_event kevent = exec_1d(cqueue, kernel, {gpu_data.get(0).mem, word_count.mem, newline_count.mem, real_size.mem}, to_read, 64, {gpudatawrite, evt4});
+            unfinished_events.get(0) = kevent;
+        }
+        else
+        {
+            cl_event kevent = exec_1d(cqueue, kernel, {gpu_data.get(0).mem, word_count.mem, newline_count.mem, standard_chunk_size.mem}, to_read, 64, {gpudatawrite});
+            unfinished_events.get(0) = kevent;
+        }
 
         gpu_data.flip();
         fptrs.flip();
