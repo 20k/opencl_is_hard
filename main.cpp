@@ -369,6 +369,8 @@ int main()
     {
         int to_read = std::min(remaining, CHUNK_SIZE);
 
+        int* ntoread = new int(to_read);
+
         if(unfinished_events.get(0) != std::nullopt)
             wait(*unfinished_events.get(0));
 
@@ -378,7 +380,7 @@ int main()
 
         buffer real_size;
         real_size.alloc(ctx, 8);
-        cl_event evt4 = real_size.async_write(cqueue, &to_read, sizeof(to_read));
+        cl_event evt4 = real_size.async_write(cqueue, ntoread, sizeof(to_read));
 
         cl_event kevent = exec_1d(cqueue, kernel, {gpu_data.get(0).mem, word_count.mem, newline_count.mem, real_size.mem}, to_read, 64, {gpudatawrite, evt4});
         unfinished_events.get(0) = kevent;
