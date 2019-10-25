@@ -7,6 +7,8 @@
 #include <SFML/System.hpp>
 #include <algorithm>
 #include <atomic>
+#include <optional>
+#include <array>
 
 void get_platform_ids(cl_platform_id* clSelectedPlatformID)
 {
@@ -58,7 +60,7 @@ void get_platform_ids(cl_platform_id* clSelectedPlatformID)
     }
 }
 
-#define CHECK(x) if(auto err = x; err != CL_SUCCESS) {throw std::runtime_error("Got error " + std::to_string(err));}
+#define CHECK(x) do{if(auto err = x; err != CL_SUCCESS) {throw std::runtime_error("Got error " + std::to_string(err));}}while(0)
 
 std::string program_source =
 R"(
@@ -145,6 +147,20 @@ struct buffer
         return event;
     }
 
+    cl_event async_write(cl_command_queue cqueue, void* ptr, size_t bytes, const std::vector<cl_event>& events)
+    {
+        assert(bytes <= allocation);
+
+        cl_event event;
+
+        if(events.size() == 0)
+            CHECK(clEnqueueWriteBuffer(cqueue, mem, CL_FALSE, 0, bytes, ptr, 0, nullptr, &event));
+        else
+            CHECK(clEnqueueWriteBuffer(cqueue, mem, CL_FALSE, 0, bytes, ptr, events.size(), &events[0], &event));
+
+        return event;
+    }
+
     cl_event async_read(cl_command_queue cqueue, void* ptr, size_t bytes, const std::vector<cl_event>& events)
     {
         cl_event event;
@@ -206,18 +222,20 @@ void read_file_into(FILE* pFile, size_t file_size, void* ptr)
 template<typename T>
 struct double_buffered
 {
+    #define FLIPSIZE 4
+
     int which = 0;
-    T data[2];
+    std::array<T, FLIPSIZE> data = {};
 
     T& get(int offset)
     {
-        return data[(which + offset) % 2];
+        return data[(which + offset) % FLIPSIZE];
     }
 
     void flip()
     {
         which++;
-        which %= 2;
+        which %= FLIPSIZE;
     }
 };
 
@@ -304,29 +322,25 @@ int main()
 
     ///would be very possible to load the file in chunks, and overlap gpu data transfer and execution with file loading
     double_buffered<pcie_mem> file;
+    double_buffered<void*> fptrs;
+    double_buffered<buffer> gpu_data;
 
     size_t file_to_read_size = file_size("test.txt");
 
-    #define CHUNK_SIZE 1024 * 1024
+    #define CHUNK_SIZE 1024 * 1024 * 5
 
-    file.get(0).allocate(ctx, CHUNK_SIZE);
-    file.get(1).allocate(ctx, CHUNK_SIZE);
+    for(int i=0; i < FLIPSIZE; i++)
+    {
+        file.get(i).allocate(ctx, CHUNK_SIZE);
 
-    int remaining = file_to_read_size;
+        gpu_data.get(i).alloc(ctx, CHUNK_SIZE);
 
-    double_buffered<buffer> gpu_data;
-    gpu_data.get(0).alloc(ctx, CHUNK_SIZE);
-    gpu_data.get(1).alloc(ctx, CHUNK_SIZE);
+        auto [cptr1, file_event1] = file.get(i).map(cqueue, CL_MAP_READ | CL_MAP_WRITE);
 
-    auto [cptr1, file_event1] = file.get(0).map(cqueue, CL_MAP_READ | CL_MAP_WRITE);
-    auto [cptr2, file_event2] = file.get(1).map(cqueue, CL_MAP_READ | CL_MAP_WRITE);
+        wait(file_event1);
 
-    wait(file_event1);
-    wait(file_event2);
-
-    double_buffered<void*> fptrs;
-    fptrs.data[0] = cptr1;
-    fptrs.data[1] = cptr2;
+        fptrs.data[i] = cptr1;
+    }
 
     FILE* pFile = fopen("test.txt", "rb");
 
@@ -340,25 +354,34 @@ int main()
     newline_count.alloc(ctx, 4);
     cl_event evt3 = newline_count.async_write(cqueue, &zero, sizeof(zero));
 
-    wait(evt2);
-    wait(evt3);
+    //wait(evt2);
+    //wait(evt3);
+
+    double_buffered<std::optional<cl_event>> unfinished_events;
+
+    int remaining = file_to_read_size;
 
     while(remaining > 0)
     {
         int to_read = std::min(remaining, CHUNK_SIZE);
 
+        if(unfinished_events.get(0) != std::nullopt)
+            wait(*unfinished_events.get(0));
+
         read_file_into(pFile, to_read, fptrs.get(0));
 
-        cl_event gpudatawrite = gpu_data.get(0).async_write(cqueue, fptrs.get(0), to_read);
+        cl_event gpudatawrite = gpu_data.get(0).async_write(async_queue, fptrs.get(0), to_read);
 
         buffer real_size;
         real_size.alloc(ctx, 8);
         cl_event evt4 = real_size.async_write(cqueue, &to_read, sizeof(to_read));
 
         cl_event kevent = exec_1d(cqueue, kernel, {gpu_data.get(0).mem, word_count.mem, newline_count.mem, real_size.mem}, to_read, 64, {gpudatawrite, evt4});
+        unfinished_events.get(0) = kevent;
 
         gpu_data.flip();
         fptrs.flip();
+        unfinished_events.flip();
 
         remaining -= to_read;
     }
