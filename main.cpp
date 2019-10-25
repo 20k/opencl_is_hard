@@ -315,7 +315,7 @@ int main()
 
     size_t file_to_read_size = file_size("test.txt");
 
-    #define CHUNK_SIZE 1024 * 1024 * 5
+    #define CHUNK_SIZE 1024 * 1024 * (16 / FLIPSIZE)
 
     cl_event last_event;
 
