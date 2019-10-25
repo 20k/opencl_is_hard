@@ -130,9 +130,9 @@ struct buffer
     cl_mem mem;
     size_t allocation = 0;
 
-    void alloc(cl_context ctx, size_t bytes)
+    void alloc(cl_context ctx, size_t bytes, cl_mem_flags flags = CL_MEM_READ_WRITE)
     {
-        mem = clCreateBuffer(ctx, CL_MEM_READ_WRITE, bytes, nullptr, nullptr);
+        mem = clCreateBuffer(ctx, flags, bytes, nullptr, nullptr);
         allocation = bytes;
     }
 
@@ -329,18 +329,22 @@ int main()
 
     #define CHUNK_SIZE 1024 * 1024 * 5
 
+    cl_event last_event;
+
     for(int i=0; i < FLIPSIZE; i++)
     {
         file.get(i).allocate(ctx, CHUNK_SIZE);
 
-        gpu_data.get(i).alloc(ctx, CHUNK_SIZE);
+        gpu_data.get(i).alloc(ctx, CHUNK_SIZE, CL_MEM_READ_ONLY);
 
         auto [cptr1, file_event1] = file.get(i).map(cqueue, CL_MAP_READ | CL_MAP_WRITE);
 
-        wait(file_event1);
-
         fptrs.data[i] = cptr1;
+
+        last_event = file_event1;
     }
+
+    wait(last_event);
 
     FILE* pFile = fopen("test.txt", "rb");
 
