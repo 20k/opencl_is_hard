@@ -5,6 +5,8 @@
 #include <string.h>
 #include <assert.h>
 #include <SFML/System.hpp>
+#include <algorithm>
+#include <atomic>
 
 void get_platform_ids(cl_platform_id* clSelectedPlatformID)
 {
@@ -78,7 +80,13 @@ void some_func(__global char* data, __global int* words, __global int* newlines,
     if(mdata == '\n')
         atomic_inc(newlines);
 
-    if(iswspace(mdata) && id != 0 && !iswspace(data[id - 1]))
+    if(id == 0)
+        return;
+
+    bool m1 = iswspace(data[id]);
+    bool m2 = !iswspace(data[id - 1]);
+
+    if(m1 && m2)
         atomic_inc(words);
 }
 )";
@@ -190,12 +198,40 @@ size_t file_size(const std::string& file)
     return fsize;
 }
 
-void read_file_into(const std::string& file, size_t file_size, void* ptr)
+void read_file_into(FILE* pFile, size_t file_size, void* ptr)
 {
-    FILE *f = fopen(file.c_str(), "rb");
-    fread(ptr, file_size, 1, f);
-    fclose(f);
+    fread(ptr, file_size, 1, pFile);
 }
+
+template<typename T>
+struct double_buffered
+{
+    int which = 0;
+    T data[2];
+
+    T& get(int offset)
+    {
+        return data[(which + offset) % 2];
+    }
+
+    void flip()
+    {
+        which++;
+        which %= 2;
+    }
+};
+
+template<typename T>
+void set_event_callback(cl_event evt, T func, void* usrdata)
+{
+    clSetEventCallback(evt, CL_COMPLETE, func, usrdata);
+}
+
+struct udata
+{
+    std::atomic_int* atom_ptr;
+    int your_ptr = 0;
+};
 
 int main()
 {
@@ -262,28 +298,37 @@ int main()
         throw std::runtime_error("Could not create kernel " + std::to_string(error));
 
     cl_command_queue cqueue = clCreateCommandQueue(ctx,  selected_device, 0, nullptr);
+    cl_command_queue async_queue = clCreateCommandQueue(ctx, selected_device, CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE, nullptr);
 
     sf::Clock init;
 
     ///would be very possible to load the file in chunks, and overlap gpu data transfer and execution with file loading
-    pcie_mem file;
+    double_buffered<pcie_mem> file;
 
     size_t file_to_read_size = file_size("test.txt");
 
-    file.allocate(ctx, file_to_read_size);
+    #define CHUNK_SIZE 1024 * 1024
 
-    auto [cptr, file_event] = file.map(cqueue, CL_MAP_READ | CL_MAP_WRITE);
+    file.get(0).allocate(ctx, CHUNK_SIZE);
+    file.get(1).allocate(ctx, CHUNK_SIZE);
 
-    wait(file_event);
+    int remaining = file_to_read_size;
 
-    read_file_into("test.txt", file_to_read_size, cptr);
+    double_buffered<buffer> gpu_data;
+    gpu_data.get(0).alloc(ctx, CHUNK_SIZE);
+    gpu_data.get(1).alloc(ctx, CHUNK_SIZE);
 
-    buffer gpu_data;
-    gpu_data.alloc(ctx, file_to_read_size);
+    auto [cptr1, file_event1] = file.get(0).map(cqueue, CL_MAP_READ | CL_MAP_WRITE);
+    auto [cptr2, file_event2] = file.get(1).map(cqueue, CL_MAP_READ | CL_MAP_WRITE);
 
-    cl_event gpudatawrite = gpu_data.async_write(cqueue, cptr, file_to_read_size);
+    wait(file_event1);
+    wait(file_event2);
 
-    file.unmap(cqueue, cptr);
+    double_buffered<void*> fptrs;
+    fptrs.data[0] = cptr1;
+    fptrs.data[1] = cptr2;
+
+    FILE* pFile = fopen("test.txt", "rb");
 
     int zero = 0;
 
@@ -295,20 +340,39 @@ int main()
     newline_count.alloc(ctx, 4);
     cl_event evt3 = newline_count.async_write(cqueue, &zero, sizeof(zero));
 
-    buffer real_size;
-    real_size.alloc(ctx, 8);
-    cl_event evt4 = real_size.async_write(cqueue, &file_to_read_size, sizeof(file_to_read_size));
+    wait(evt2);
+    wait(evt3);
 
-    cl_event kevent = exec_1d(cqueue, kernel, {gpu_data.mem, word_count.mem, newline_count.mem, real_size.mem}, file_to_read_size, 64, {gpudatawrite, evt2, evt3, evt4});
+    while(remaining > 0)
+    {
+        int to_read = std::min(remaining, CHUNK_SIZE);
 
-    int read_one = 0;
-    int read_two = 0;
+        read_file_into(pFile, to_read, fptrs.get(0));
 
-    wait(word_count.async_read(cqueue, &read_one, sizeof(read_one), {kevent}));
-    wait(newline_count.async_read(cqueue, &read_two, sizeof(read_two), {kevent}));
+        cl_event gpudatawrite = gpu_data.get(0).async_write(cqueue, fptrs.get(0), to_read);
 
-    printf("WORD COUNT %i\n", read_one);
-    printf("NEWLINE COUNT %i\n", read_two);
+        buffer real_size;
+        real_size.alloc(ctx, 8);
+        cl_event evt4 = real_size.async_write(cqueue, &to_read, sizeof(to_read));
+
+        cl_event kevent = exec_1d(cqueue, kernel, {gpu_data.get(0).mem, word_count.mem, newline_count.mem, real_size.mem}, to_read, 64, {gpudatawrite, evt4});
+
+        gpu_data.flip();
+        fptrs.flip();
+
+        remaining -= to_read;
+    }
+
+    fclose(pFile);
+
+    int cword_count = 0;
+    int cnewline_count = 0;
+
+    word_count.async_read(cqueue, &cword_count, sizeof(int), {});
+    wait(newline_count.async_read(cqueue, &cnewline_count, sizeof(int), {}));
+
+    printf("WORD COUNT %i ", cword_count);
+    printf("NEWLINE COUNT %i ", cnewline_count);
 
     printf("Time elapsed in s %lf\n", init.getElapsedTime().asMicroseconds() / 1000. / 1000.);
 
