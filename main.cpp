@@ -239,18 +239,6 @@ struct double_buffered
     }
 };
 
-template<typename T>
-void set_event_callback(cl_event evt, T func, void* usrdata)
-{
-    clSetEventCallback(evt, CL_COMPLETE, func, usrdata);
-}
-
-struct udata
-{
-    std::atomic_int* atom_ptr;
-    int your_ptr = 0;
-};
-
 int main()
 {
     cl_platform_id pid = {};
