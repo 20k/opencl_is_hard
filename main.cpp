@@ -336,6 +336,10 @@ int main()
 
     FILE* pFile = fopen("test.txt", "rb");
 
+    ///seems to make no difference disabling buffering, i wonder if because we're reading in chunks already
+    ///the buffer is basically skipped
+    //setvbuf(pFile, nullptr, _IONBF, 0);
+
     int zero = 0;
 
     buffer word_count;
